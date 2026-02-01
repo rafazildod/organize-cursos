@@ -1,0 +1,5 @@
+*.deb
+*.log
+hash_index.json
+rename_log.csv
+__pycache__/
