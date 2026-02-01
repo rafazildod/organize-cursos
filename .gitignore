@@ -1,5 +1,11 @@
+# Package artifacts
 *.deb
+
+# Logs and generated files
 *.log
 hash_index.json
 rename_log.csv
+
+# Python
 __pycache__/
+*.py[cod]

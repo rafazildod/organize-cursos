@@ -1,0 +1,9 @@
+Package: organize-cursos
+Version: 1.2
+Section: utils
+Priority: optional
+Architecture: all
+Depends: python3
+Maintainer: Rafael Dantas
+Description: Organize and normalize course PDFs with integrated fix, undo, and dry-run
+
