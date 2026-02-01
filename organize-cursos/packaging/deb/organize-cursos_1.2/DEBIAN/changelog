@@ -1,0 +1,22 @@
+organize-cursos (1.2)
+---------------------
+
+- Integrated mechanical filename fix into --apply
+- Added built-in --undo command
+- Improved idempotency and safety
+- Rebuild hash index from disk every run
+
+organize-cursos (1.1)
+---------------------
+
+- Added fix-filenames utility
+- Improved filename normalization
+- Packaging cleanup
+
+organize-cursos (1.0)
+---------------------
+
+- Initial release
+- Recursive PDF organization
+- Dry-run and apply modes
+- Duplicate detection via hashing

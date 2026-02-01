@@ -1,0 +1,254 @@
+#!/usr/bin/env python3
+
+from pathlib import Path
+import re
+import csv
+import hashlib
+import json
+import argparse
+import sys
+from collections import defaultdict, Counter
+
+# =========================
+# CLI
+# =========================
+parser = argparse.ArgumentParser(
+    description="Normalize and organize course PDFs safely"
+)
+parser.add_argument("--dry-run", action="store_true", help="Preview only")
+parser.add_argument("--apply", action="store_true", help="Apply changes")
+parser.add_argument("--undo", action="store_true", help="Undo last apply")
+
+args = parser.parse_args()
+
+# =========================
+# FILES (LOCAL)
+# =========================
+DISCIPLINE_FILE = Path("disciplinas.csv")
+LOG_FILE = Path("rename_log.csv")
+HASH_INDEX_FILE = Path("hash_index.json")
+
+# =========================
+# UNDO MODE
+# =========================
+if args.undo:
+    if not LOG_FILE.exists():
+        print("ERROR: rename_log.csv not found", file=sys.stderr)
+        sys.exit(1)
+
+    with LOG_FILE.open(newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+
+    print("\nUNDO MODE\n")
+    for row in reversed(rows):
+        old = Path(row["old_path"])
+        new = Path(row["new_path"])
+        if new.exists():
+            print(f"UNDO: {new} → {old}")
+            old.parent.mkdir(parents=True, exist_ok=True)
+            new.rename(old)
+
+    print("\nUndo complete.")
+    sys.exit(0)
+
+# =========================
+# MODE
+# =========================
+DRY_RUN = not args.apply
+MODE = "DRY-RUN" if DRY_RUN else "APPLY"
+print(f"\nRunning in {MODE} mode\n")
+
+# =========================
+# CONSTANTS
+# =========================
+KNOWN_TAGS = {
+    "simplificado", "completo", "resumido",
+    "exercicios", "video", "slides", "pdf"
+}
+
+AULA_KEYS = {"aula", "trilha"}
+STOP_WORDS = AULA_KEYS | KNOWN_TAGS | {"curso", "prof", "profa", "professor"}
+
+# =========================
+# HELPERS
+# =========================
+def normalize(text: str):
+    return re.split(r"[^a-z0-9]+", text.lower())
+
+def mechanical_fix(path: Path):
+    """
+    Lossless filename cleanup:
+    - remove '-pdf-'
+    - remove '.pdf.pdf'
+    - collapse '--'
+    - lowercase
+    """
+    name = path.name.lower()
+    fixed = name
+
+    fixed = re.sub(r"-pdf-", "-", fixed)
+    fixed = re.sub(r"\.pdf\.pdf$", ".pdf", fixed)
+    fixed = re.sub(r"-{2,}", "-", fixed)
+
+    if fixed != name:
+        target = path.with_name(fixed)
+        print(f"FIX: {path} → {target}")
+        if not DRY_RUN:
+            path.rename(target)
+        return target
+
+    return path
+
+def extract_course(tokens):
+    for t in tokens:
+        if t.isdigit():
+            return t
+    return None
+
+def extract_aula(tokens):
+    for i, t in enumerate(tokens):
+        if t in AULA_KEYS and i + 1 < len(tokens) and tokens[i + 1].isdigit():
+            return f"{int(tokens[i + 1]):02d}"
+    return "00"
+
+def extract_tags(tokens):
+    return sorted(set(t for t in tokens if t in KNOWN_TAGS))
+
+def infer_discipline(tokens, course_code):
+    try:
+        idx = tokens.index(course_code)
+    except ValueError:
+        return None
+    for t in tokens[idx + 1:]:
+        if t.isdigit() or t in STOP_WORDS or len(t) < 3:
+            continue
+        return t
+    return None
+
+def file_hash(path: Path, chunk_size=1024 * 1024):
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(chunk_size), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+def safe_target(path: Path):
+    if not path.exists():
+        return path
+    stem = path.stem
+    for i in range(2, 1000):
+        candidate = path.with_stem(f"{stem}-{i}")
+        if not candidate.exists():
+            return candidate
+    raise RuntimeError("Too many filename collisions")
+
+# =========================
+# FIX STEP (APPLY ONLY)
+# =========================
+if not DRY_RUN:
+    print("Running mechanical filename cleanup...\n")
+    for pdf in Path(".").rglob("*.pdf"):
+        mechanical_fix(pdf)
+
+# =========================
+# DISCOVER COURSES
+# =========================
+name_votes = defaultdict(Counter)
+
+for pdf in Path(".").rglob("*.pdf"):
+    tokens = normalize(pdf.name)
+    code = extract_course(tokens)
+    if not code:
+        continue
+    inferred = infer_discipline(tokens, code)
+    if inferred:
+        name_votes[code][inferred] += 1
+
+# =========================
+# BOOTSTRAP disciplinas.csv
+# =========================
+if not DISCIPLINE_FILE.exists():
+    with DISCIPLINE_FILE.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["course_code", "discipline_name"])
+        for code, counter in sorted(name_votes.items()):
+            name = counter.most_common(1)[0][0] if counter else "unknown"
+            writer.writerow([code, name])
+
+    print(f"\nCreated {DISCIPLINE_FILE}. Review it, then rerun.")
+    sys.exit(0)
+
+# =========================
+# LOAD DISCIPLINES
+# =========================
+discipline_map = {}
+
+with DISCIPLINE_FILE.open(newline="", encoding="utf-8") as f:
+    reader = csv.reader(f)
+    for row in reader:
+        if not row or row[0].startswith("#") or len(row) < 2:
+            continue
+        discipline_map[row[0].strip()] = row[1].strip()
+
+# =========================
+# REBUILD HASH INDEX
+# =========================
+hash_index = {}
+
+for pdf in Path(".").rglob("*.pdf"):
+    tokens = normalize(pdf.name)
+    if extract_course(tokens) is None:
+        try:
+            hash_index[file_hash(pdf)] = str(pdf)
+        except Exception:
+            pass
+
+# =========================
+# MAIN ORGANIZE STEP
+# =========================
+log_rows = []
+
+for pdf in Path(".").rglob("*.pdf"):
+    tokens = normalize(pdf.name)
+    course = extract_course(tokens)
+
+    if not course or course not in discipline_map:
+        continue
+
+    current_hash = file_hash(pdf)
+    if current_hash in hash_index:
+        print(f"SKIP (duplicate): {pdf}")
+        log_rows.append([str(pdf), hash_index[current_hash], "duplicate_hash"])
+        continue
+
+    discipline = discipline_map[course]
+    aula = extract_aula(tokens)
+    tags = extract_tags(tokens) or ["unknown"]
+
+    new_name = f"{discipline}-aula-{aula}-" + "-".join(tags) + ".pdf"
+    target_dir = Path(discipline)
+    target_dir.mkdir(exist_ok=True)
+
+    target_path = safe_target(target_dir / new_name)
+    print(f"{MODE}: {pdf} → {target_path}")
+
+    if not DRY_RUN:
+        pdf.rename(target_path)
+        hash_index[current_hash] = str(target_path)
+
+    log_rows.append([str(pdf), str(target_path), "ok"])
+
+# =========================
+# WRITE LOGS
+# =========================
+with LOG_FILE.open("w", newline="", encoding="utf-8") as f:
+    writer = csv.writer(f)
+    writer.writerow(["old_path", "new_path", "status"])
+    writer.writerows(log_rows)
+
+with HASH_INDEX_FILE.open("w", encoding="utf-8") as f:
+    json.dump(hash_index, f, indent=2)
+
+print("\nDone.")
+
